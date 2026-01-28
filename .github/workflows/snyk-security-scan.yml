@@ -14,7 +14,7 @@ jobs:
   #   env:
   #     SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
   #     SNYK_CFG_ORG: varner-tech-engineering
-
+    
   #   steps:
   #     - name: Checkout code
   #       uses: actions/checkout@v3
@@ -55,24 +55,15 @@ jobs:
     permissions:
       contents: write
       actions: read
-    env:
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Snyk CLI
-        uses: snyk/actions/setup@master
-
-      - name: Authenticate Snyk CLI
-        run: snyk auth "${{ secrets.SNYK_TOKEN }}"
-
       - name: Generate SBOM (CycloneDX JSON)
-        run: |
-          echo "Generating SBOM with Snyk..."
-          snyk sbom --format=cyclonedx1.6+json > sbom.cdx.json
-          echo "SBOM generation completed successfully"
-          ls -la sbom.cdx.json
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -86,8 +77,8 @@ jobs:
         with:
           files: sbom.cdx.json
 
-      - name: Display SBOM info
-        run: |
-          echo "SBOM generated successfully"
-          ls -la sbom.cdx.json
-          echo "SBOM size: $(wc -c < sbom.cdx.json) bytes"
+      - name: Submit SBOM to Dependency Graph
+        uses: advanced-security/sbom-dependency-submission-action@v0
+        with:
+          sbom-path: sbom.cdx.json
+          fail-on-error: true
