@@ -25,8 +25,13 @@
 #        Value: <your Snyk API token>
 #
 # CUSTOMIZATION:
-#   - Adjust --severity-threshold to control what blocks the pipeline.
+#   - --severity-threshold controls which vulnerabilities appear in the REPORT.
 #     Valid values: low | medium | high | critical
+#   - --fail-on controls when the build actually FAILS (SCA only).
+#     Valid values:
+#       all         — Fail on any vuln that can be upgraded or patched.
+#       upgradable  — Fail only on vulns that can be upgraded.
+#       patchable   — Fail only on vulns that can be patched.
 #   - Replace the --org value with your own Snyk Organization ID.
 #   - Replace --project-name values to match your project naming convention.
 #   - Uncomment the pull_request trigger to gate PRs before merge.
@@ -62,7 +67,10 @@ jobs:
   # Snyk vulnerability database. This catches known CVEs in third-party
   # packages before they reach production.
   #
-  # Gating policy: FAILS the pipeline on HIGH or CRITICAL severity issues.
+  # Gating policy:
+  #   --severity-threshold=high  → Report only high/critical vulnerabilities.
+  #   --fail-on=all              → FAIL the build when any reported vuln has
+  #                                 an available fix (upgrade or patch).
   # ==========================================================================
   snyk-sca-scan:
     name: SCA - Snyk Open Source Scan
@@ -104,34 +112,42 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # -- Run the SCA scan --
+      # -- Run the SCA scan and save JSON results to a file --
       # Flags explained:
-      #   --severity-threshold=high   Only fail on high or critical findings.
-      #   --json                      Output results as JSON (for HTML report).
+      #   --severity-threshold=high   Report only high or critical findings.
+      #                               NOTE: This only filters the report output.
+      #                               It does NOT cause the CLI to exit non-zero.
+      #   --fail-on=all               FAIL the build when any reported vuln
+      #                               has an available fix (upgrade or patch).
+      #                               This flag controls the actual exit code.
+      #   --json                      Output results as JSON (saved to file).
       #   --report                    Also send results to the Snyk Dashboard.
       #   --org                       Your Snyk Organization ID.
       #   --project-name              Name shown in the Snyk Dashboard.
       #   --target-reference          Tags results with the branch/tag name.
       #
-      # The JSON output is piped to "npx snyk-to-html" which generates a
-      # human-readable HTML report saved as snyk-sca-report.html.
-      #
-      # "continue-on-error: true" lets the job proceed to upload the report
-      # even when vulnerabilities are found. The gate is enforced in the
-      # "Evaluate" step below.
+      # JSON is saved to a file (not piped) so we can reliably capture the
+      # exit code from "snyk test --fail-on=all" and still generate the HTML
+      # report in a separate step.
       - name: Snyk Open Source Test (Gate on High/Critical)
         id: sca-scan
         continue-on-error: true
         run: |
           snyk test \
             --severity-threshold=high \
+            --fail-on=all \
             --json \
             --report \
             --org=2c2549f7-de55-4c31-aaea-bea685244487 \
             --project-name="nodejs-goof-sca" \
-            --target-reference=${{ github.ref_name }} | npx snyk-to-html -o snyk-sca-report.html
+            --target-reference=${{ github.ref_name }} > snyk-sca-results.json
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      # -- Generate the HTML report from JSON results --
+      - name: Generate SCA HTML Report
+        if: always()
+        run: npx snyk-to-html -i snyk-sca-results.json -o snyk-sca-report.html
 
       # -- Upload the HTML report as a downloadable artifact --
       # "if: always()" ensures the report is uploaded whether the scan
@@ -144,9 +160,9 @@ jobs:
           path: snyk-sca-report.html
 
       # -- Enforce the gate: fail the job if vulnerabilities were found --
-      # This step checks the outcome of the scan step. If it failed
-      # (vulnerabilities at or above the threshold), this exits non-zero
-      # to mark the job as failed in the GitHub Actions UI.
+      # --fail-on=all causes "snyk test" to exit non-zero when fixable
+      # high/critical vulns exist. This step re-asserts that exit code
+      # after the report has been uploaded.
       - name: Evaluate SCA scan result
         if: steps.sca-scan.outcome == 'failure'
         run: exit 1
@@ -159,6 +175,11 @@ jobs:
   # path traversal, hardcoded secrets, and more — directly in your code.
   #
   # Gating policy: FAILS the pipeline on MEDIUM or higher severity issues.
+  #
+  # NOTE: "snyk code test" does NOT support --fail-on, and
+  # --severity-threshold only filters the report — it does not affect
+  # the exit code. To enforce a gate, the scan saves JSON to a file and
+  # a separate step parses it with jq to check for findings.
   # ==========================================================================
   snyk-code-scan:
     name: SAST - Snyk Code Scan
@@ -185,28 +206,34 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # -- Run the SAST scan --
+      # -- Run the SAST scan and save JSON results to a file --
       # Flags explained:
-      #   --severity-threshold=medium  Fail on medium, high, or critical findings.
-      #   --json                       Output results as JSON (for HTML report).
+      #   --severity-threshold=medium  Report medium, high, and critical findings.
+      #                                NOTE: This only filters the report output.
+      #                                It does NOT cause the CLI to exit non-zero.
+      #   --json                       Output results as JSON (saved to file).
       #   --report                     Also send results to the Snyk Dashboard.
       #   --org                        Your Snyk Organization ID.
       #   --project-name               Name shown in the Snyk Dashboard.
       #
-      # Same pattern as SCA: JSON is piped to snyk-to-html, and
-      # continue-on-error allows the artifact upload to run before gating.
-      - name: Snyk Code Test (Gate on Medium+)
-        id: sast-scan
-        continue-on-error: true
+      # Unlike "snyk test" (SCA), "snyk code test" does NOT support --fail-on,
+      # so we save JSON to a file and check for findings explicitly in a
+      # later step to enforce the gate.
+      - name: Snyk Code Test
         run: |
           snyk code test \
             --severity-threshold=medium \
             --json \
             --report \
             --org=2c2549f7-de55-4c31-aaea-bea685244487 \
-            --project-name="nodejs-goof-sast" | npx snyk-to-html -o snyk-sast-report.html
+            --project-name="nodejs-goof-sast" > snyk-sast-results.json || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      # -- Generate the HTML report from JSON results --
+      - name: Generate SAST HTML Report
+        if: always()
+        run: npx snyk-to-html -i snyk-sast-results.json -o snyk-sast-report.html
 
       # -- Upload the SAST HTML report as a downloadable artifact --
       - name: Upload SAST HTML Report
@@ -216,10 +243,19 @@ jobs:
           name: snyk-sast-report
           path: snyk-sast-report.html
 
-      # -- Enforce the gate --
-      - name: Evaluate SAST scan result
-        if: steps.sast-scan.outcome == 'failure'
-        run: exit 1
+      # -- Enforce the gate: fail if medium+ severity SAST issues exist --
+      # Since --severity-threshold only filters the report and does not
+      # affect the exit code, we parse the JSON output with jq to check
+      # for findings. If any results are present (medium+), the step
+      # exits non-zero, failing the job.
+      - name: Evaluate SAST scan result (Gate on Medium+)
+        run: |
+          FINDINGS=$(jq '[.runs[].results[]] | length' snyk-sast-results.json 2>/dev/null || echo "0")
+          if [ "$FINDINGS" -gt 0 ]; then
+            echo "::error::Snyk Code found $FINDINGS medium+ severity issue(s). See the HTML report artifact for details."
+            exit 1
+          fi
+          echo "No medium+ severity SAST issues found."
 
 # ============================================================================
 # VIEWING RESULTS
