@@ -176,6 +176,8 @@ jobs:
           snyk container monitor ${{ env.DOCKER_IMAGE }} \
             --file=Dockerfile \
             --org=${{ env.SNYK_ORG }} \
-            --project-name=nodejs-github-action-container
+            --remote-repo-url=${{ env.REPO_URL }} \
+            --project-name=nodejs-github-action-container \
+            --target-reference=${{ github.ref_name }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
