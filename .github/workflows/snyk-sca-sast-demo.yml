@@ -95,7 +95,8 @@ jobs:
             --severity-threshold=high \
             --org=${{ env.SNYK_ORG }} \
             --remote-repo-url=${{ env.REPO_URL }} \
-            --project-name=nodejs-github-action-sast
+            --project-name=nodejs-github-action-sast \
+            --target-reference=${{ github.ref_name }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -132,7 +133,8 @@ jobs:
           snyk iac test vulnerable.tf \
             --report \
             --org=${{ env.SNYK_ORG }} \
-            --remote-repo-url=${{ env.REPO_URL }}
+            --remote-repo-url=${{ env.REPO_URL }} \
+            --target-reference=${{ github.ref_name }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
