@@ -1,206 +1,75 @@
-# ============================================================================
-# Snyk SCA & SAST Security Pipeline for GitHub Actions
-# ============================================================================
-#
-# WHAT THIS DOES:
-#   This workflow integrates Snyk into your CI/CD pipeline to automatically
-#   scan for security vulnerabilities on every push and pull request. It runs
-#   two independent, parallel jobs:
-#
-#   1. SCA (Software Composition Analysis) - Scans your open-source
-#      dependencies (e.g., npm packages) for known vulnerabilities.
-#   2. SAST (Static Application Security Testing) - Scans your first-party
-#      source code for security issues like SQL injection, XSS, and more.
-#
-#   Each job runs TWO scans:
-#     a) A report scan — saves JSON results, converts them to an HTML report
-#        via "npx snyk-to-html", and uploads the report as a downloadable
-#        GitHub Actions artifact. This scan always succeeds (|| true) so the
-#        report is available regardless of findings.
-#     b) A gating scan — runs the plain Snyk CLI (no --json, no piping) so
-#        the native exit code determines pass/fail. This is what actually
-#        blocks the pipeline when vulnerabilities are found.
-#
-# HOW GATING WORKS:
-#   --severity-threshold  controls which vulnerabilities appear in the REPORT.
-#                         It does NOT control the exit code on its own.
-#   --fail-on             controls when "snyk test" (SCA) actually exits
-#                         non-zero. Valid values: all | upgradable | patchable.
-#                         "snyk code test" (SAST) does not support --fail-on.
-#
-# PREREQUISITES:
-#   1. A Snyk account (free tier works) — https://app.snyk.io
-#   2. A Snyk API token — https://app.snyk.io/account (API Token section)
-#   3. Your Snyk Organization ID — found in Snyk under Settings > General
-#   4. The SNYK_TOKEN secret configured in your GitHub repo:
-#        Repo > Settings > Secrets and variables > Actions > New repository secret
-#        Name:  SNYK_TOKEN
-#        Value: <your Snyk API token>
-#
-# CUSTOMIZATION:
-#   - Adjust --severity-threshold to control what appears in reports.
-#     Valid values: low | medium | high | critical
-#   - Adjust --fail-on (SCA only) to control when the build fails.
-#     Valid values:
-#       all         — Fail on any vuln that can be upgraded or patched.
-#       upgradable  — Fail only on vulns that can be upgraded.
-#       patchable   — Fail only on vulns that can be patched.
-#   - Replace the --org value with your own Snyk Organization ID.
-#   - Replace --project-name values to match your project naming convention.
-#   - Uncomment the pull_request trigger to gate PRs before merge.
-#   - To add Container or IaC scanning, see:
-#     https://github.com/snyk/actions
-#
-# REFERENCE:
-#   https://docs.snyk.io/developer-tools/snyk-cli/scan-and-maintain-projects-using-the-cli/failing-of-builds-in-snyk-cli
-# ============================================================================
+name: Snyk Full Security Pipeline (SCA + SAST + IaC + Container)
 
-name: Snyk SCA and SAST Security Pipeline
-
-# ============================================================================
-# TRIGGER CONFIGURATION
-# ============================================================================
-# push:              Runs on every push to main/master (post-merge scanning).
-# pull_request:      (Commented out) Uncomment to scan PRs before merging.
-# workflow_dispatch: Allows manual runs from the GitHub Actions UI.
 on:
   push:
     branches: [ main, master ]
-  # pull_request:
-  #   branches: [ main, master ]
   workflow_dispatch:
 
-# ============================================================================
-# Both jobs below run in PARALLEL. Neither depends on the other, so you will
-# always see results from both SCA and SAST even if one of them fails.
-# ============================================================================
+env:
+  SNYK_ORG: "2c2549f7-de55-4c31-aaea-bea685244487"
+  REPO_URL: "https://github.com/${{ github.repository }}"
+  DOCKER_IMAGE: "nodejs-goof:${{ github.sha }}"
+
 jobs:
 
-  # ==========================================================================
-  # JOB 1: SCA — Snyk Open Source Scan
-  # ==========================================================================
-  # Scans your dependency tree (package.json / package-lock.json) against the
-  # Snyk vulnerability database. Catches known CVEs in third-party packages.
-  #
-  # This job runs TWO scans:
-  #   1. Report scan  → --json output saved to file, converted to HTML,
-  #                      uploaded as an artifact. Always succeeds.
-  #   2. Gating scan  → plain CLI output, uses --fail-on=all to exit non-zero
-  #                      when fixable high/critical vulnerabilities exist.
-  # ==========================================================================
+  # ── Open Source (SCA) ────────────────────────────────────────────────
   snyk-sca-scan:
-    name: SCA - Snyk Open Source Scan
+    name: SCA - Open Source Scan
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-      security-events: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Change node-version to match your project's requirements.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      # Snyk needs node_modules to resolve the full dependency tree.
       - name: Install dependencies
         run: npm install
 
       - name: Setup Snyk CLI
         uses: snyk/actions/setup@master
 
-      # SNYK_TOKEN must be set in: Repo > Settings > Secrets > Actions
       - name: Authenticate Snyk
         run: snyk auth ${{ secrets.SNYK_TOKEN }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # ----------------------------------------------------------------------
-      # SCAN 1: Generate the HTML report (always succeeds)
-      # ----------------------------------------------------------------------
-      # Runs snyk test with --json and saves output to a file. The "|| true"
-      # ensures this step always passes — its only purpose is to capture
-      # results for the HTML report and send them to the Snyk Dashboard.
-      # --report sends results to the Snyk Dashboard for continuous monitoring.
-      - name: "Report: Run SCA scan and save JSON results"
+      - name: "SCA: Test (find vulnerable dependencies)"
+        continue-on-error: true
         run: |
           snyk test \
             --severity-threshold=high \
-            --json \
-            --report \
-            --org=2c2549f7-de55-4c31-aaea-bea685244487 \
-            --project-name="nodejs-goof-sca" \
-            --target-reference=${{ github.ref_name }} > snyk-sca-results.json || true
+            --org=${{ env.SNYK_ORG }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # Convert the JSON results to a human-readable HTML report using
-      # the Snyk-to-HTML tool (https://github.com/snyk/snyk-to-html).
-      - name: "Report: Generate HTML from JSON"
-        if: always()
-        run: npx snyk-to-html -i snyk-sca-results.json -o snyk-sca-report.html
-
-      # Upload the HTML report as a downloadable artifact.
-      # Find it in the Actions run under the "Artifacts" section.
-      - name: "Report: Upload SCA HTML report"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: snyk-sca-report
-          path: snyk-sca-report.html
-
-      # ----------------------------------------------------------------------
-      # SCAN 2: Gate the pipeline (actually fails the build)
-      # ----------------------------------------------------------------------
-      # Runs snyk test with plain CLI output (no --json, no piping) so the
-      # native exit code is used directly.
-      #
-      # --severity-threshold=high  → Report only high/critical vulnerabilities.
-      # --fail-on=all              → Exit non-zero when any reported vuln has
-      #                              an available fix (upgrade or patch).
-      #                              This is what actually gates the pipeline.
-      #
-      # Without --fail-on, --severity-threshold only filters the display.
-      # See: https://docs.snyk.io/developer-tools/snyk-cli/scan-and-maintain-projects-using-the-cli/failing-of-builds-in-snyk-cli
-      - name: "Gate: SCA scan (fail on high/critical with available fix)"
+      - name: "SCA: Monitor (upload to dashboard)"
+        continue-on-error: true
         run: |
-          snyk test \
-            --severity-threshold=high \
-            --fail-on=all
+          snyk monitor \
+            --org=${{ env.SNYK_ORG }} \
+            --remote-repo-url=${{ env.REPO_URL }} \
+            --project-name="nodejs-github-action sca" \
+            --target-reference=${{ github.ref_name }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-  # ==========================================================================
-  # JOB 2: SAST — Snyk Code Scan
-  # ==========================================================================
-  # Scans your first-party source code for security vulnerabilities using
-  # Snyk's static analysis engine. Catches issues like SQL injection, XSS,
-  # path traversal, hardcoded secrets, and more.
-  #
-  # This job runs TWO scans:
-  #   1. Report scan  → --json output saved to file, converted to HTML,
-  #                      uploaded as an artifact. Always succeeds.
-  #   2. Gating scan  → plain CLI output. "snyk code test" does NOT support
-  #                      --fail-on, so the exit code is checked directly.
-  # ==========================================================================
+  # ── Code (SAST) ─────────────────────────────────────────────────────
   snyk-code-scan:
     name: SAST - Snyk Code Scan
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-      security-events: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # SAST does not require "npm install" — Snyk Code analyzes source
-      # files directly without needing to build the project.
       - name: Setup Snyk CLI
         uses: snyk/actions/setup@master
 
@@ -209,74 +78,102 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # ----------------------------------------------------------------------
-      # SCAN 1: Generate the HTML report (always succeeds)
-      # ----------------------------------------------------------------------
-      # Runs snyk code test with --json and saves output to a file.
-      # --report sends results to the Snyk Dashboard.
-      - name: "Report: Run SAST scan and save JSON results"
+      - name: "SAST: Test (find code vulnerabilities)"
+        continue-on-error: true
         run: |
           snyk code test \
-            --severity-threshold=medium \
-            --json \
+            --severity-threshold=high \
+            --org=${{ env.SNYK_ORG }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: "SAST: Report (upload to dashboard)"
+        continue-on-error: true
+        run: |
+          snyk code test \
             --report \
-            --org=2c2549f7-de55-4c31-aaea-bea685244487 \
-            --project-name="nodejs-goof-sast" > snyk-sast-results.json || true
+            --severity-threshold=high \
+            --org=${{ env.SNYK_ORG }} \
+            --remote-repo-url=${{ env.REPO_URL }} \
+            --project-name="nodejs-github-action sast"
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: "Report: Generate HTML from JSON"
-        if: always()
-        run: npx snyk-to-html -i snyk-sast-results.json -o snyk-sast-report.html
+  # ── Infrastructure as Code (IaC) ────────────────────────────────────
+  snyk-iac-scan:
+    name: IaC - Infrastructure as Code Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
-      - name: "Report: Upload SAST HTML report"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: snyk-sast-report
-          path: snyk-sast-report.html
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # ----------------------------------------------------------------------
-      # SCAN 2: Gate the pipeline (actually fails the build)
-      # ----------------------------------------------------------------------
-      # Runs snyk code test with plain CLI output (no --json, no piping).
-      #
-      # --severity-threshold=medium  → Report medium, high, and critical issues.
-      #
-      # NOTE: "snyk code test" does NOT support --fail-on. The CLI exits
-      # non-zero when any issues are found at or above the severity threshold.
-      - name: "Gate: SAST scan (fail on medium+)"
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Authenticate Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: "IaC: Test (find misconfigurations)"
+        continue-on-error: true
         run: |
-          snyk code test \
-            --severity-threshold=medium
+          snyk iac test vulnerable.tf \
+            --org=${{ env.SNYK_ORG }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-# ============================================================================
-# VIEWING RESULTS
-# ============================================================================
-# 1. GitHub Actions UI:
-#    - Each job shows pass/fail status in the Actions tab.
-#    - Download the HTML reports from the "Artifacts" section of any run.
-#    - The gating scan shows plain CLI output in the step logs, making it
-#      easy to see exactly which vulnerabilities caused the failure.
-#
-# 2. Snyk Dashboard:
-#    - The --report flag (on the report scan) sends results to your org.
-#    - View them at: https://app.snyk.io → your org → Projects
-#    - Look for project names: nodejs-goof-sca and nodejs-goof-sast
-#
-# ============================================================================
-# NEXT STEPS / EXTENDING THIS PIPELINE
-# ============================================================================
-# - Uncomment the pull_request trigger above to gate PRs before merge.
-# - Add Snyk Container scanning to test your Docker images:
-#     snyk container test <image> --file=Dockerfile
-# - Add Snyk IaC scanning to test Terraform, CloudFormation, etc.:
-#     snyk iac test <file-or-directory>
-# - Generate an SBOM (Software Bill of Materials):
-#     snyk sbom --format=cyclonedx1.6+json
-# - Upload SARIF results to GitHub's Security tab for native integration:
-#     snyk test --sarif-file-output=snyk.sarif
-#     then use github/codeql-action/upload-sarif@v2
-# ============================================================================
+      - name: "IaC: Report (upload to dashboard)"
+        continue-on-error: true
+        run: |
+          snyk iac test vulnerable.tf \
+            --report \
+            --org=${{ env.SNYK_ORG }} \
+            --remote-repo-url=${{ env.REPO_URL }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # ── Container ───────────────────────────────────────────────────────
+  snyk-container-scan:
+    name: Container - Docker Image Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Authenticate Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Build Docker image
+        run: docker build -t ${{ env.DOCKER_IMAGE }} .
+
+      - name: "Container: Test (find OS-level vulnerabilities)"
+        continue-on-error: true
+        run: |
+          snyk container test ${{ env.DOCKER_IMAGE }} \
+            --file=Dockerfile \
+            --severity-threshold=high \
+            --org=${{ env.SNYK_ORG }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: "Container: Monitor (upload to dashboard)"
+        continue-on-error: true
+        run: |
+          snyk container monitor ${{ env.DOCKER_IMAGE }} \
+            --file=Dockerfile \
+            --org=${{ env.SNYK_ORG }} \
+            --project-name="nodejs-github-action container"
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}

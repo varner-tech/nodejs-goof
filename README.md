@@ -1,214 +1,349 @@
-# Goof - Snyk's vulnerable demo app
-[![Known Vulnerabilities](https://snyk.io/test/github/snyk/goof/badge.svg?style=flat-square)](https://snyk.io/test/github/snyk/goof)
+# nodejs-goof — Snyk Security Demo Application
 
-A vulnerable Node.js demo application, based on the [Dreamers Lab tutorial](http://dreamerslab.com/blog/en/write-a-todo-list-with-express-and-mongodb/).
+A vulnerable Node.js todo app used to demonstrate every Snyk product: **Open Source (SCA)**, **Code (SAST)**, **Container**, and **Infrastructure as Code (IaC)**.
 
-## Features
+Based on the [Dreamers Lab tutorial](http://dreamerslab.com/blog/en/write-a-todo-list-with-express-and-mongodb/), extended with workspaces, audit logging, webhooks, and automation rules.
 
-This vulnerable app includes the following capabilities to experiment with:
-* [Exploitable packages](#exploiting-the-vulnerabilities) with known vulnerabilities
-* [Docker Image Scanning](#docker-image-scanning) for base images with known vulnerabilities in system libraries
-* [Runtime alerts](#runtime-alerts) for detecting an invocation of vulnerable functions in open source dependencies
+---
 
-## Running
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Project Structure](#project-structure)
+- [Snyk Scanning](#snyk-scanning)
+  - [Run All Scans](#run-all-scans)
+  - [Open Source (SCA)](#open-source-sca)
+  - [Code (SAST)](#code-sast)
+  - [Infrastructure as Code (IaC)](#infrastructure-as-code-iac)
+  - [Container](#container)
+  - [Target Merging (snykCodeNormaliseRemoteUrl)](#target-merging-snykcodeNormaliseRemoteUrl)
+- [CI/CD Pipelines](#cicd-pipelines)
+- [Application Features](#application-features)
+- [Intentional Vulnerabilities](#intentional-vulnerabilities)
+  - [Vulnerable Dependencies (SCA)](#vulnerable-dependencies-sca)
+  - [Code Vulnerabilities (SAST)](#code-vulnerabilities-sast)
+  - [Infrastructure Misconfigurations (IaC)](#infrastructure-misconfigurations-iac)
+- [Snyk Policy File (.snyk)](#snyk-policy-file-snyk)
+- [Exploits](#exploits)
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+
+- MongoDB 3.x (required by legacy dependencies)
+- [Snyk CLI](https://docs.snyk.io/snyk-cli/install-or-update-the-snyk-cli) authenticated (`snyk auth`)
+- Docker (optional, for container scanning)
+
+### Run locally
+
 ```bash
-mongod &
+# Start MongoDB (via Docker or locally)
+docker run --rm -p 27017:27017 mongo:3
 
-git clone https://github.com/snyk-labs/nodejs-goof
+# Clone, install, and start
+git clone https://github.com/Snyk-Integration-App/nodejs-goof.git
+cd nodejs-goof
 npm install
 npm start
 ```
-This will run Goof locally, using a local mongo on the default port and listening on port 3001 (http://localhost:3001)
 
-Note: You *have* to use an old version of MongoDB version due to some of these old libraries' database server APIs. MongoDB 3 is known to work ok.
+The app listens on [http://localhost:3001](http://localhost:3001).
 
-You can also run the MongoDB server individually via Docker, such as:
+### Run with Docker Compose
 
-```sh
-docker run --rm -p 27017:27017 mongo:3
-```
-
-## Running with docker-compose
 ```bash
 docker-compose up --build
 docker-compose down
 ```
 
-### Heroku usage
-Goof requires attaching a MongoLab service to be deployed as a Heroku app. 
-That sets up the MONGOLAB_URI env var so everything after should just work. 
+---
 
-### CloudFoundry usage
-Goof requires attaching a MongoLab service and naming it "goof-mongo" to be deployed on CloudFoundry. 
-The code explicitly looks for credentials to that service. 
+## Project Structure
 
-### Cleanup
-To bulk delete the current list of TODO items from the DB run:
+```
+nodejs-goof/
+├── app.js                          # Express app entry point
+├── mongoose-db.js                  # Mongoose schemas and DB connection
+├── typeorm-db.js                   # TypeORM entity setup
+├── package.json                    # Dependencies (many intentionally vulnerable)
+├── Dockerfile                      # Vulnerable base image (node:14.18.1)
+├── docker-compose.yml              # App + MongoDB + MySQL
+├── vulnerable.tf                   # Terraform with security misconfigs
+├── .snyk                           # Snyk policy: excludes and ignores
+│
+├── routes/
+│   ├── index.js                    # Core routes (login, todos, CRUD)
+│   ├── api.js                      # REST API router
+│   ├── workspaces.js               # Workspace CRUD + membership
+│   ├── workspace-todos.js          # Workspace-scoped todo CRUD
+│   ├── audit.js                    # Audit log API
+│   ├── webhooks.js                 # Webhook management API
+│   ├── rules.js                    # Automation rules API
+│   ├── todo-import.js              # CSV todo import
+│   ├── users.js                    # User routes
+│   └── xss-vulnerable.js           # XSS demo endpoints
+│
+├── services/
+│   ├── rule-engine.js              # Condition eval, action execution, cron scheduler
+│   ├── webhook-delivery.js         # In-memory queue, HMAC-signed POST, retries
+│   ├── workspace-auth.js           # Membership and role checks
+│   └── audit.js                    # Audit event creation
+│
+├── middleware/
+│   └── api-auth.js                 # API authentication middleware
+│
+├── scripts/
+│   ├── snyk-scan-all.sh            # Run every Snyk scan with dashboard upload
+│   ├── audit-retention.js          # Delete audit events older than N days
+│   └── test-terraform.sh           # Validate Terraform config
+│
+├── .github/workflows/
+│   └── snyk-sca-sast-demo.yml      # GitHub Actions: SCA + SAST pipeline
+│
+├── azure-pipelines-snyk-sca-sast-demo.yml  # Azure DevOps equivalent
+│
+├── docs/
+│   ├── API.md                      # Full REST API reference
+│   ├── ARCHITECTURE-WORKSPACES.md  # Architecture: workspaces, audit, webhooks, rules
+│   └── snyk-dashboard-upload-commands.md  # CLI upload commands + target merging
+│
+├── exploits/                       # Step-by-step exploit demos
+├── views/                          # EJS + Handlebars templates
+└── public/                         # Static assets
+```
+
+---
+
+## Snyk Scanning
+
+### Run All Scans
+
+A single script runs every Snyk scan type, uploads results to the dashboard, and uses `--remote-repo-url` so that SCA and Code results merge into the same target (requires the `snykCodeNormaliseRemoteUrl` feature flag).
+
+```bash
+./scripts/snyk-scan-all.sh
+```
+
+Options:
+
+```
+--org ORG_ID          Snyk org ID (default: from script)
+--repo-url REPO_URL   Remote repo URL for target merging
+--skip-container      Skip Docker build and container scanning
+```
+
+The script runs these scans in order:
+
+| # | Scan Type | Command | What It Does |
+|---|---|---|---|
+| 1 | **SCA** (local) | `snyk test` | Tests npm dependencies for known vulns |
+| 2 | **SCA** (dashboard) | `snyk monitor` | Uploads dependency snapshot to Snyk dashboard |
+| 3 | **SAST** (local) | `snyk code test` | Analyzes first-party JavaScript code for security issues |
+| 4 | **SAST** (dashboard) | `snyk code test --report` | Uploads SAST results to Snyk dashboard |
+| 5 | **IaC** (local) | `snyk iac test` | Checks `vulnerable.tf` for misconfigurations |
+| 6 | **IaC** (dashboard) | `snyk iac test --report` | Uploads IaC results to Snyk dashboard |
+| 7 | **Container** (build) | `docker build` | Builds the Docker image |
+| 8 | **Container** (local) | `snyk container test` | Scans image for OS-level vulns |
+| 9 | **Container** (dashboard) | `snyk container monitor` | Uploads container results to Snyk dashboard |
+
+### Open Source (SCA)
+
+```bash
+# Local test — find vulnerable dependencies
+snyk test --severity-threshold=high
+
+# Upload to dashboard for continuous monitoring
+snyk monitor --remote-repo-url="https://github.com/Snyk-Integration-App/nodejs-goof"
+```
+
+### Code (SAST)
+
+```bash
+# Local test — find code-level vulnerabilities
+snyk code test --severity-threshold=high
+
+# Upload to dashboard
+snyk code test --report \
+  --remote-repo-url="https://github.com/Snyk-Integration-App/nodejs-goof" \
+  --project-name="sast"
+```
+
+### Infrastructure as Code (IaC)
+
+```bash
+# Local test
+snyk iac test vulnerable.tf
+
+# Upload to dashboard
+snyk iac test vulnerable.tf --report
+```
+
+### Container
+
+```bash
+# Build the image
+docker build -t nodejs-goof:latest .
+
+# Local test
+snyk container test nodejs-goof:latest --file=Dockerfile
+
+# Upload to dashboard
+snyk container monitor nodejs-goof:latest --file=Dockerfile --project-name="container/nodejs-goof"
+```
+
+### Target Merging (`snykCodeNormaliseRemoteUrl`)
+
+By default, `snyk monitor` (SCA) and `snyk code test --report` (SAST) create separate targets in the Snyk dashboard even for the same repo. The `snykCodeNormaliseRemoteUrl` feature flag fixes this.
+
+**How to enable:**
+
+1. Activate the `snykCodeNormaliseRemoteUrl` feature flag on your Snyk org/group.
+2. Use the same `--remote-repo-url` for both SCA and Code uploads.
+3. Clean up any existing duplicate targets via the Snyk UI or API.
+
+The `scripts/snyk-scan-all.sh` script already uses `--remote-repo-url` consistently across SCA and Code so results merge into a single target.
+
+**Limitations:**
+- SCM Import + CLI Upload merge is **not available** yet.
+- Custom `--target-name` for Open Source CLI is **not supported** (expected with Dragonfly).
+
+See [docs/snyk-dashboard-upload-commands.md](docs/snyk-dashboard-upload-commands.md) for full details.
+
+---
+
+## CI/CD Pipelines
+
+### GitHub Actions
+
+`.github/workflows/snyk-sca-sast-demo.yml` runs SCA and SAST on push to main and on manual dispatch.
+
+**Required secrets:** `SNYK_TOKEN`
+
+### Azure DevOps
+
+`azure-pipelines-snyk-sca-sast-demo.yml` is the Azure DevOps equivalent with the same SCA + SAST stages.
+
+**Required variables:** `SNYK_TOKEN`, `SNYK_ORG_ID`
+
+Both pipelines run in report-only mode by default (don't block the build). Uncomment the blocking steps to enforce gating on high/critical vulnerabilities.
+
+---
+
+## Application Features
+
+### Workspaces and Multi-Tenancy
+
+Multi-tenant workspaces with role-based access (`owner`, `admin`, `member`, `viewer`). Each workspace has its own todos, audit log, webhooks, and automation rules. Authentication is via `X-User-Id` header or session.
+
+### Audit Log
+
+Every mutation (todo CRUD, workspace updates, member changes) creates an audit event with actor, action, resource, IP, and timestamp. Paginated and filterable via the API. Optional retention cleanup via `node scripts/audit-retention.js [days]`.
+
+### Webhooks
+
+Workspace-scoped outbound webhooks. On each audited event, the app POSTs a JSON payload with `X-Webhook-Signature: sha256=<hmac-hex>` to registered URLs. Timeout 15s, payload capped at 100kb, retries up to 3x with exponential backoff.
+
+### Automation Rules
+
+Condition-based rules triggered by `todo.created`, `todo.updated`, or a cron `schedule`. Actions: `send_webhook` (POST to URL) or `update_todos` (bulk update matching todos). Max 50 rules per workspace, 5 actions per rule.
+
+### API
+
+Full REST API at `/api`. See [docs/API.md](docs/API.md) for the complete reference.
+
+---
+
+## Intentional Vulnerabilities
+
+This project contains intentional security vulnerabilities across multiple scan types for demonstration purposes.
+
+### Vulnerable Dependencies (SCA)
+
+The `package.json` includes packages with known vulnerabilities:
+
+| Package | Vulnerability |
+|---|---|
+| `mongoose` 6.13.6 | Buffer Memory Exposure |
+| `st` 0.2.4 | Directory Traversal |
+| `ms` 0.7.1 | ReDoS |
+| `marked` 0.3.5 | XSS |
+| `adm-zip` 0.4.7 | Zip Slip |
+| `lodash` 4.17.4 | Prototype Pollution |
+| `ejs` 1.0.0 | Code Injection |
+| `express` 4.12.4 | Multiple (outdated) |
+
+### Code Vulnerabilities (SAST)
+
+First-party code issues that Snyk Code detects:
+
+| File | Vulnerability |
+|---|---|
+| `routes/index.js` | NoSQL Injection, Open Redirect, Hardcoded Secrets |
+| `app.js` | Hardcoded session secret, Insecure cookie config |
+| `mongoose-db.js` | Hardcoded credentials (admin password) |
+
+### Infrastructure Misconfigurations (IaC)
+
+`vulnerable.tf` contains:
+- Security group allowing SSH from `0.0.0.0/0`
+- EC2 instance with unencrypted root volume
+- Missing IMDSv2 enforcement
+- Open egress rule
+
+---
+
+## Snyk Policy File (`.snyk`)
+
+The `.snyk` file configures:
+
+- **Excludes** — `routes/xss-vulnerable.js` and `tests/**` are excluded from Snyk Code scanning to avoid false positives from demo/test payloads.
+- **Ignores** — Specific SCA vulnerabilities that have been reviewed and accepted (e.g., `adm-zip` Zip Slip, `lodash` Prototype Pollution).
+
+Each ignore entry includes a reason and expiry date for audit purposes.
+
+---
+
+## Exploits
+
+The `exploits/` directory contains step-by-step demonstrations:
+
+**NoSQL Injection** — Login bypass via MongoDB `$gt` operator:
+```bash
+echo '{"username": "admin@snyk.io", "password": {"$gt": ""}}' | \
+  http --json http://localhost:3001/login
+```
+
+**Code Injection** — Server-side template injection via Handlebars `layout`:
+```bash
+curl -X POST --cookie c.txt --cookie-jar c.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin@snyk.io","password":"SuperSecretPassword"}' \
+  http://localhost:3001/login
+
+curl -X POST --cookie c.txt --cookie-jar c.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@snyk.io","firstname":"admin","lastname":"admin","country":"IL","phone":"+972551234123","layout":"./../package.json"}' \
+  http://localhost:3001/account_details
+```
+
+**Open Redirect** — Unvalidated redirect:
+```
+http://localhost:3001/login?redirectPage=https://google.com
+```
+
+**Directory Traversal** — Via the `st` static file server.
+
+**ReDoS** — Denial of service via `ms` and `validator` regex.
+
+---
+
+## Cleanup
+
 ```bash
 npm run cleanup
 ```
 
-## Exploiting the vulnerabilities
-
-This app uses npm dependencies holding known vulnerabilities,
-as well as insecure code that introduces code-level vulnerabilities.
-
-The `exploits/` directory includes a series of steps to demonstrate each one.
-
-### Vulnerabilities in open source dependencies
-
-Here are the exploitable vulnerable packages:
-- [Mongoose - Buffer Memory Exposure](https://snyk.io/vuln/npm:mongoose:20160116) - requires a version <= Node.js 8. For the exploit demo purposes, one can update the Dockerfile `node` base image to use `FROM node:6-stretch`.
-- [st - Directory Traversal](https://snyk.io/vuln/npm:st:20140206)
-- [ms - ReDoS](https://snyk.io/vuln/npm:ms:20151024)
-- [marked - XSS](https://snyk.io/vuln/npm:marked:20150520)
-
-### Vulnerabilities in code
-
-* Open Redirect
-* NoSQL Injection
-* Code Injection
-* Command execution
-* Cross-site Scripting (XSS)
-* Information exposure via Hardcoded values in code
-* Security misconfiguration exposes server information 
-* Insecure protocol (HTTP) communication 
-
-#### Code injection
-
-The page at `/account_details` is rendered as an Handlebars view.
-
-The same view is used for both the GET request which shows the account details, as well as the form itself for a POST request which updates the account details. A so-called Server-side Rendering.
-
-The form is completely functional. The way it works is, it receives the profile information from the `req.body` and passes it, as-is to the template. This however means, that the attacker is able to control a variable that flows directly from the request into the view template library.
-
-You'd think that what's the worst that can happen because we use a validation to confirm the expected input, however the validation doesn't take into account a new field that can be added to the object, such as `layout`, which when passed to a template language, could lead to Local File Inclusion (Path Traversal) vulnerabilities. Here is a proof-of-concept showing it:
-
-```sh
-curl -X 'POST' --cookie c.txt --cookie-jar c.txt -H 'Content-Type: application/json' --data-binary '{"username": "admin@snyk.io", "password": "SuperSecretPassword"}' 'http://localhost:3001/login'
-```
-
-```sh
-curl -X 'POST' --cookie c.txt --cookie-jar c.txt -H 'Content-Type: application/json' --data-binary '{"email": "admin@snyk.io", "firstname": "admin", "lastname": "admin", "country": "IL", "phone": "+972551234123",  "layout": "./../package.json"}' 'http://localhost:3001/account_details'
-```
-
-Actually, there's even another vulnerability in this code.
-The `validator` library that we use has several known regular expression denial of service vulnerabilities. One of them, is associated with the email regex, which if validated with the `{allow_display_name: true}` option then we can trigger a denial of service for this route:
-
-```sh
-curl -X 'POST' -H 'Content-Type: application/json' --data-binary "{\"email\": \"`seq -s "" -f "<" 100000`\"}" 'http://localhost:3001/account_details'
-```
-
-The `validator.rtrim()` sanitizer is also vulnerable, and we can use this to create a similar denial of service attack:
-
-```sh
-curl -X 'POST' -H 'Content-Type: application/json' --data-binary "{\"email\": \"someone@example.com\", \"country\": \"nop\", \"phone\": \"0501234123\", \"lastname\": \"nop\", \"firstname\": \"`node -e 'console.log(" ".repeat(100000) + "!")'`\"}" 'http://localhost:3001/account_details'
-```
-
-#### NoSQL injection
-
-A POST request to `/login` will allow for authentication and signing-in to the system as an administrator user.
-It works by exposing `loginHandler` as a controller in `routes/index.js` and uses a MongoDB database and the `User.find()` query to look up the user's details (email as a username and password). One issue is that it indeed stores passwords in plaintext and not hashing them. However, there are other issues in play here.
-
-
-We can send a request with an incorrect password to see that we get a failed attempt
-```sh
-echo '{"username":"admin@snyk.io", "password":"WrongPassword"}' | http --json $GOOF_HOST/login -v
-```
-
-And another request, as denoted with the following JSON request to sign-in as the admin user works as expected:
-```sh
-echo '{"username":"admin@snyk.io", "password":"SuperSecretPassword"}' | http --json $GOOF_HOST/login -v
-```
-
-However, what if the password wasn't a string? what if it was an object? Why would an object be harmful or even considered an issue?
-Consider the following request:
-```sh
-echo '{"username": "admin@snyk.io", "password": {"$gt": ""}}' | http --json $GOOF_HOST/login -v
-```
-
-We know the username, and we pass on what seems to be an object of some sort.
-That object structure is passed as-is to the `password` property and has a specific meaning to MongoDB - it uses the `$gt` operation which stands for `greater than`. So, we in essence tell MongoDB to match that username with any record that has a password that is greater than `empty string` which is bound to hit a record. This introduces the NoSQL Injection vector.
-
-#### Open redirect
-
-The `/admin` view introduces a `redirectPage` query path, as follows in the admin view:
-
-```
-<input type="hidden" name="redirectPage" value="<%- redirectPage %>" />
-```
-
-One fault here is that the `redirectPage` is rendered as raw HTML and not properly escaped, because it uses `<%- >` instead of `<%= >`. That itself, introduces a Cross-site Scripting (XSS) vulnerability via:
-
-```
-http://localhost:3001/login?redirectPage="><script>alert(1)</script>
-```
-
-To exploit the open redirect, simply provide a URL such as `redirectPage=https://google.com` which exploits the fact that the code doesn't enforce local URLs in `index.js:72`.
-
-#### Hardcoded values - session information
-
-The application initializes a cookie-based session on `app.js:40` as follows:
-
-```js
-app.use(session({
-  secret: 'keyboard cat',
-  name: 'connect.sid',
-  cookie: { secure: true }
-}))
-```
-
-As you can see, the session `secret` used to sign the session is a hardcoded sensitive information inside the code.
-
-First attempt to fix it, can be to move it out to a config file such as:
-```js
-module.exports = {
-    cookieSecret: `keyboard cat`
-}
-```
-
-And then require the configuration file and use it to initialize the session.
-However, that still maintains the secret information inside another file, and Snyk Code will warn you about it.
-
-Another case we can discuss here in session management, is that the cookie setting is initialized with `secure: true` which means it will only be transmitted over HTTPS connections. However, there's no `httpOnly` flag set to true, which means that the default false value of it makes the cookie accessible via JavaScript. Snyk Code highlights this potential security misconfiguration so we can fix it. We can note that Snyk Code shows this as a quality information, and not as a security error.
-
-Snyk Code will also find hardcoded secrets in source code that isn't part of the application logic, such as `tests/` or `examples/` folders. We have a case of that in this application with the `tests/authentication.component.spec.js` file. In the finding, Snyk Code will tag it as `InTest`, `Tests`, or `Mock`, which help us easily triage it and indeed ignore this finding as it isn't actually a case of information exposure.
-
-## Docker Image Scanning
-
-The `Dockerfile` makes use of a base image (`node:6-stretch`) that is known to have system libraries with vulnerabilities.
-
-To scan the image for vulnerabilities, run:
-```bash
-snyk test --docker node:6-stretch --file=Dockerfile
-```
-
-To monitor this image and receive alerts with Snyk:
-```bash
-snyk monitor --docker node:6-stretch
-```
-
-## Runtime Alerts
-
-Snyk provides the ability to monitor application runtime behavior and detect an invocation of a function is known to be vulnerable and used within open source dependencies that the application makes use of.
-
-The agent is installed and initialized in [app.js](./app.js#L5).
-
-For the agent to report back to your snyk account on the vulnerabilities it detected it needs to know which project on Snyk to associate with the monitoring. Due to that, we need to provide it with the project id through an environment variable `SNYK_PROJECT_ID`
-
-To run the Node.js app with runtime monitoring:
-```bash
-SNYK_PROJECT_ID=<PROJECT_ID> npm start
-```
-
-** The app will continue to work normally even if it's not provided a project id
-
-## Fixing the issues
-To find these flaws in this application (and in your own apps), run:
-```
-npm install -g snyk
-snyk wizard
-```
-
-In this application, the default `snyk wizard` answers will fix all the issues.
-When the wizard is done, restart the application and run the exploits again to confirm they are fixed.
+Bulk deletes all TODO items from MongoDB.
