@@ -1,0 +1,20 @@
+[project]
+name = "goof-python"
+version = "0.1.0"
+description = "A small intentionally-vulnerable Python companion service for nodejs-goof, managed with the uv package manager."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "flask==1.1.1",
+    "jinja2==2.11.2",
+    "pyyaml==5.3.1",
+    "requests==2.20.0",
+    "urllib3==1.24.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["goof_python"]
