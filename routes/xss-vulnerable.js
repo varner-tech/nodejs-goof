@@ -1,64 +1,14 @@
+// Updated: 2026-09-01 - Trigger security scan
 const express = require('express');
 const router = express.Router();
-
-const sanitizeInput = (value = '') =>
-    String(value).replace(/[&<>"'`=/]/g, (char) => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-        '`': '&#96;',
-        '=': '&#61;',
-        '/': '&#47;'
-    }[char] || char));
-
-const { startVulnerableResponse } = require('../service/xssResponder');
-
-// UNSAFE: Direct XSS vulnerability - matches pattern Snyk detects
-// This is a simple reflected XSS that Snyk should flag
-// router.get('/', (req, res) => {
-//     // Get user input directly from query parameter without sanitization
-//     // This is the source of the XSS vulnerability
-//     const userInput = req.query.input || 'No input provided';
-
-//     const html = processUserInput(userInput, res);
-
-//     res.send(html);
-// });
-
-function processUserInput(userInput, res) {
-    return `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>XSS Vulnerability Demo</title>
-        </head>
-        <body>
-            <h1>XSS Vulnerability Demo</h1>
-            <div>${userInput}</div>
-            <p><a href="/xss-vuln/secure?input=Try%20this%20secure%20endpoint">Try the secure endpoint</a></p>
-        </body>
-        </html>   
-    `; 
-}
- 
+const sanitizeHtml = require('sanitize-html');
 
 // SECURE: Safe endpoint with proper HTML escaping
 router.get('/secure', (req, res) => {
     // Get user input from query parameter
-    const userInput = req.query.input || 'No input provided';
+    const userInput = req.query.input;
     
-    // SECURE: Use Content Security Policy header to mitigate XSS impact
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'");
-    
-    // SECURE: Set X-XSS-Protection header (for older browsers)
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    
-    // SECURE: Set X-Content-Type-Options to prevent MIME type sniffing
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    
-    res.contentType('text/plain').send(`
+    res.send(`
         <!DOCTYPE html>
         <html>
         <head>
@@ -100,8 +50,8 @@ router.get('/secure/json', (req, res) => {
 
     res.json({
         message: 'Secure JSON echo',
-        echo: userInput,
-        rawLength: userInput.length
+        echo: String(userInput),
+        rawLength: String(userInput).length
     });
 });
 
