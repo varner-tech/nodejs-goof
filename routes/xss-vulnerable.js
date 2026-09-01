@@ -1,3 +1,4 @@
+// Updated: 2026-09-01 - Trigger security scan
 const express = require('express');
 const router = express.Router();
 
